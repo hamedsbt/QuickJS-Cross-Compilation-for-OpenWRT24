@@ -90,8 +90,12 @@ jobs:
       run: |
         cd $QUICKJS_SOURCE
         
-        # Build with cross-compiler
-        make -j$(nproc) qjs qjsc
+        make clean 2>/dev/null || true
+        make CC="${{ env.TARGET_PREFIX }}gcc" \
+         AR="${{ env.TARGET_PREFIX }}ar" \
+         STRIP="${{ env.TARGET_PREFIX }}strip" \
+         CFLAGS="-Os -pipe" \
+         -j$(nproc)
         
         # Verify the binary architecture
         file qjs
