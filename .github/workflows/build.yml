@@ -1,4 +1,4 @@
-name: Build QuickJS for OpenWrt
+name: Build QuickJS for OpenWrt arm64
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
       run: |
         # Download OpenWrt 24.10 SDK for your target architecture
         # Replace with actual SDK URL for your target
-        SDK_URL="https://downloads.openwrt.org/releases/24.10.0/targets/${{ matrix.subtarget }}/openwrt-sdk-24.10.0-${{ matrix.arch }}-generic_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+        SDK_URL="https://downloads.openwrt.org/releases/24.10.5/targets/bcm27xx/bcm2711/openwrt-sdk-24.10.5-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
         
         echo "Downloading OpenWrt SDK..."
         wget -q $SDK_URL -O openwrt-sdk.tar.xz
