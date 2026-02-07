@@ -1,126 +1,78 @@
-name: Build QuickJS for OpenWrt 24.10 (Pi 4, aarch64)
+name: QuickJS OpenWrt 24.10 (aarch64 musl)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-quickjs:
-    runs-on: ubuntu-latest
-
-    env:
-      OPENWRT_VERSION: 24.10.5
-      TARGET_ARCH: aarch64
-      TARGET_CPU: cortex-a72
-      QUICKJS_VERSION: 2025-09-13
+  build:
+    runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout QuickJS
+        uses: actions/checkout@v4
+        with:
+          repository: bellard/quickjs
+          fetch-depth: 1
 
-    # ------------------------------------------------------------
-    # OpenWrt SDK
-    # ------------------------------------------------------------
-    - name: Download OpenWrt SDK
-      run: |
-        set -e
-        SDK_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/bcm27xx/bcm2711/openwrt-sdk-${OPENWRT_VERSION}-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+      - name: Install build deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential \
+            file \
+            wget \
+            xz-utils \
+            python3
 
-        wget -q --show-progress "$SDK_URL" -O sdk.tar.zst
-        tar --zstd -xf sdk.tar.zst
-        mv openwrt-sdk-* openwrt-sdk
+      - name: Download OpenWrt 24.10 SDK (aarch64 cortex-a72 musl)
+        run: |
+          wget -q https://downloads.openwrt.org/releases/24.10.0/targets/bcm27xx/bcm2711/openwrt-sdk-24.10.0-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.xz
+          tar -xf openwrt-sdk-24.10.0-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.xz
 
-        echo "OPENWRT_SDK=$PWD/openwrt-sdk" >> $GITHUB_ENV
-        echo "STAGING_DIR=$PWD/openwrt-sdk/staging_dir" >> $GITHUB_ENV
+      - name: Setup OpenWrt toolchain (CRITICAL FIX)
+        run: |
+          SDK=$(pwd)/openwrt-sdk-24.10.0-bcm27xx-bcm2711_gcc-13.3.0_musl
+          STAGING=$SDK/staging_dir
 
-    # ------------------------------------------------------------
-    # Toolchain
-    # ------------------------------------------------------------
-    - name: Setup toolchain
-      run: |
-        set -e
+          TOOLCHAIN=$(find "$STAGING" -maxdepth 1 -type d -name "toolchain-aarch64*" | head -1)
+          TARGETSYS=$(find "$STAGING" -maxdepth 1 -type d -name "target-aarch64*_musl" | head -1)
 
-        TOOLCHAIN=$(find "$STAGING_DIR" -maxdepth 1 -type d -name "toolchain-aarch64*" | head -1)
-        [ -d "$TOOLCHAIN" ]
+          echo "TOOLCHAIN=$TOOLCHAIN"
+          echo "TARGETSYS=$TARGETSYS"
 
-        echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
-        echo "SYSROOT=$TOOLCHAIN" >> $GITHUB_ENV
-        echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
-        echo "TARGET_PREFIX=aarch64-openwrt-linux-" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
+          echo "SYSROOT=$TARGETSYS" >> $GITHUB_ENV
+          echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
 
-        "$TOOLCHAIN/bin/aarch64-openwrt-linux-gcc" --version
+          echo "CC=aarch64-openwrt-linux-gcc" >> $GITHUB_ENV
+          echo "AR=aarch64-openwrt-linux-ar" >> $GITHUB_ENV
+          echo "RANLIB=aarch64-openwrt-linux-ranlib" >> $GITHUB_ENV
+          echo "STRIP=aarch64-openwrt-linux-strip" >> $GITHUB_ENV
 
-    # ------------------------------------------------------------
-    # QuickJS source
-    # ------------------------------------------------------------
-    - name: Fetch QuickJS
-      run: |
-        set -e
-        wget -q https://bellard.org/quickjs/quickjs-${QUICKJS_VERSION}.tar.xz
-        tar -xf quickjs-${QUICKJS_VERSION}.tar.xz
-        mv quickjs-${QUICKJS_VERSION} quickjs
-        echo "QUICKJS_SRC=$PWD/quickjs" >> $GITHUB_ENV
+          echo "CFLAGS=--sysroot=$TARGETSYS -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE" >> $GITHUB_ENV
+          echo "LDFLAGS=--sysroot=$TARGETSYS -Wl,--gc-sections" >> $GITHUB_ENV
 
-    # ------------------------------------------------------------
-    # Minimal musl compatibility patches (SAFE)
-    # ------------------------------------------------------------
-    - name: Apply minimal patches
-      run: |
-        set -e
-        cd "$QUICKJS_SRC"
+      - name: Clean QuickJS
+        run: |
+          make clean || true
 
-        # SIGPIPE cast (harmless but avoids warnings)
-        sed -i 's/signal(SIGPIPE, SIG_IGN);/signal(SIGPIPE, (void (*)(int))SIG_IGN);/' quickjs-libc.c || true
+      - name: Build QuickJS (qjs + qjsc)
+        run: |
+          make -j$(nproc)
 
-        # Ensure environ symbol exists
-        grep -q 'extern char \*\*environ;' quickjs-libc.c || \
-          sed -i '/#include <stdlib.h>/a extern char **environ;' quickjs-libc.c
+      - name: Verify binaries
+        run: |
+          file qjs qjsc
+          readelf -l qjs | grep interpreter || true
 
-    # ------------------------------------------------------------
-    # Build
-    # ------------------------------------------------------------
-    - name: Build QuickJS
-      run: |
-        set -e
-        cd "$QUICKJS_SRC"
+      - name: Strip binaries
+        run: |
+          $STRIP qjs qjsc
 
-        export CC="${TARGET_PREFIX}gcc"
-        export AR="${TARGET_PREFIX}ar"
-        export RANLIB="${TARGET_PREFIX}ranlib"
-        export STRIP="${TARGET_PREFIX}strip"
-
-        export CFLAGS="--sysroot=$SYSROOT -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE"
-        export LDFLAGS="--sysroot=$SYSROOT -Wl,--gc-sections"
-
-        make clean || true
-        make -j$(nproc) qjs qjsc
-
-        $STRIP qjs qjsc
-
-        file qjs
-
-    # ------------------------------------------------------------
-    # Package artifacts
-    # ------------------------------------------------------------
-    - name: Package artifacts
-      run: |
-        mkdir -p artifacts
-        cp quickjs/qjs artifacts/
-        cp quickjs/qjsc artifacts/
-
-        cat > artifacts/README.txt <<'EOF'
-        QuickJS for OpenWrt 24.10 (bcm2711 / Pi 4)
-
-        Install:
-          scp qjs root@router:/opt/app/ytdlp/
-          chmod +x /opt/app/ytdlp/qjs
-
-        yt-dlp:
-          yt-dlp --js-runtimes quickjs:/opt/app/ytdlp/qjs -F URL
-        EOF
-
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: quickjs-openwrt-24.10-pi4
-        path: artifacts/
-        retention-days: 7
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickjs-openwrt-aarch64
+          path: |
+            qjs
+            qjsc
