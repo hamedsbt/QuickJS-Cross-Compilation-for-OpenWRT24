@@ -29,28 +29,47 @@ jobs:
           wget -q https://downloads.openwrt.org/releases/24.10.5/targets/bcm27xx/bcm2711/openwrt-sdk-24.10.5-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.zst
           tar -xf openwrt-sdk-24.10.5-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.zst
 
-      - name: Setup OpenWrt toolchain (CRITICAL FIX)
+      - name: Setup OpenWrt toolchain
         run: |
+          set -e
+      
           SDK=$(pwd)/openwrt-sdk-24.10.0-bcm27xx-bcm2711_gcc-13.3.0_musl
           STAGING=$SDK/staging_dir
-
+      
+          # Find toolchain
           TOOLCHAIN=$(find "$STAGING" -maxdepth 1 -type d -name "toolchain-aarch64*" | head -1)
-          TARGETSYS=$(find "$STAGING" -maxdepth 1 -type d -name "target-aarch64*_musl" | head -1)
-
-          echo "TOOLCHAIN=$TOOLCHAIN"
-          echo "TARGETSYS=$TARGETSYS"
-
+          if [ -z "$TOOLCHAIN" ]; then
+            echo "Error: TOOLCHAIN not found!"
+            exit 1
+          fi
+      
+          # Find target sysroot (headers + libs)
+          SYSROOT=$(find "$STAGING" -maxdepth 1 -type d -name "target-aarch64*" | head -1)
+          if [ -z "$SYSROOT" ]; then
+            echo "Error: SYSROOT not found!"
+            exit 1
+          fi
+      
           echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
-          echo "SYSROOT=$TARGETSYS" >> $GITHUB_ENV
-          echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
-
+          echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
+      
+          # Export compiler and helpers
           echo "CC=aarch64-openwrt-linux-gcc" >> $GITHUB_ENV
           echo "AR=aarch64-openwrt-linux-ar" >> $GITHUB_ENV
           echo "RANLIB=aarch64-openwrt-linux-ranlib" >> $GITHUB_ENV
-          echo "STRIP=aarch64-openwrt-linux-strip" >> $GITHUB_ENV
+          echo "STRIP=$TOOLCHAIN/bin/aarch64-openwrt-linux-strip" >> $GITHUB_ENV
+      
+          # Export paths for cross-build
+          echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_PATH
+      
+          # CFLAGS/LDFLAGS for musl cross-build
+          echo "CFLAGS=--sysroot=$SYSROOT -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE" >> $GITHUB_ENV
+          echo "LDFLAGS=--sysroot=$SYSROOT -Wl,--gc-sections" >> $GITHUB_ENV
+      
+          # Verify
+          $TOOLCHAIN/bin/aarch64-openwrt-linux-gcc --version
+          $TOOLCHAIN/bin/aarch64-openwrt-linux-strip --version || echo "Strip tool found"
 
-          echo "CFLAGS=--sysroot=$TARGETSYS -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE" >> $GITHUB_ENV
-          echo "LDFLAGS=--sysroot=$TARGETSYS -Wl,--gc-sections" >> $GITHUB_ENV
 
       - name: Clean QuickJS
         run: |
