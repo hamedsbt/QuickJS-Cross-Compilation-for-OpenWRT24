@@ -1,0 +1,135 @@
+name: Build QuickJS for OpenWrt
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  build-openwrt-quickjs:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        target: [aarch64_cortex-a72]  # Add more as needed: x86_64, arm_cortex-a9, etc.
+        include:
+          - target: aarch64_cortex-a72
+            arch: aarch64
+            subtarget: cortex-a72
+            profile: raspberrypi4-64  # For Raspberry Pi 4
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup OpenWrt SDK
+      run: |
+        # Download OpenWrt 24.10 SDK for your target architecture
+        # Replace with actual SDK URL for your target
+        SDK_URL="https://downloads.openwrt.org/releases/24.10.0/targets/${{ matrix.subtarget }}/openwrt-sdk-24.10.0-${{ matrix.arch }}-generic_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+        
+        echo "Downloading OpenWrt SDK..."
+        wget -q $SDK_URL -O openwrt-sdk.tar.xz
+        tar -xf openwrt-sdk.tar.xz
+        mv openwrt-sdk-* openwrt-sdk
+        
+        # Export SDK paths
+        echo "OPENWRT_SDK=$(pwd)/openwrt-sdk" >> $GITHUB_ENV
+        echo "STAGING_DIR=$(pwd)/openwrt-sdk/staging_dir" >> $GITHUB_ENV
+        echo "TOOLCHAIN_DIR=$(pwd)/openwrt-sdk/staging_dir/toolchain-${{ matrix.arch }}*" >> $GITHUB_ENV
+    
+    - name: Setup Toolchain
+      run: |
+        # Find and setup the toolchain
+        TOOLCHAIN_PATH=$(find $STAGING_DIR -name "toolchain-*" -type d | head -1)
+        echo "Toolchain path: $TOOLCHAIN_PATH"
+        
+        # Add toolchain to PATH
+        echo "$TOOLCHAIN_PATH/bin" >> $GITHUB_PATH
+        echo "TOOLCHAIN_BIN=$TOOLCHAIN_PATH/bin" >> $GITHUB_ENV
+        
+        # Verify cross-compiler is available
+        $TOOLCHAIN_PATH/bin/${{ matrix.arch }}-openwrt-linux-gcc --version
+    
+    - name: Download QuickJS Source
+      run: |
+        wget -q https://bellard.org/quickjs/quickjs-2025-09-13.tar.xz
+        tar -xf quickjs-2025-09-13.tar.xz
+        mv quickjs-2025-09-13 quickjs-source
+        echo "QUICKJS_SOURCE=$(pwd)/quickjs-source" >> $GITHUB_ENV
+    
+    - name: Configure Cross-Compilation
+      run: |
+        cd $QUICKJS_SOURCE
+        
+        # Create a custom config.h for OpenWrt/musl
+        cat > config.h << 'EOF'
+        #define CONFIG_VERSION "2025-09-13"
+        #define CONFIG_BIGNUM  # Enable BigNum if needed
+        #define CONFIG_CC "${{ matrix.arch }}-openwrt-linux-gcc"
+        #define CONFIG_PREFIX "/usr"
+        #define CONFIG_MUSL 1  # OpenWrt uses musl libc
+        #define CONFIG_LTO  # Link Time Optimization
+        EOF
+        
+        # Patch Makefile for cross-compilation
+        sed -i 's/^CC = gcc/CC = ${{ matrix.arch }}-openwrt-linux-gcc/' Makefile
+        sed -i 's/^HOST_CC = gcc/HOST_CC = gcc/' Makefile  # Keep host CC as gcc
+        sed -i 's/^AR = ar/AR = ${{ matrix.arch }}-openwrt-linux-ar/' Makefile
+        sed -i 's/^STRIP = strip/STRIP = ${{ matrix.arch }}-openwrt-linux-strip/' Makefile
+        
+        # Set CFLAGS for OpenWrt
+        echo "CFLAGS += -Os -pipe -fno-caller-saves -fno-plt" >> Makefile
+        echo "CFLAGS += -fhonour-copts -Wno-error=unused-but-set-variable" >> Makefile
+        echo "CFLAGS += -Wno-error=unused-result -ffunction-sections -fdata-sections" >> Makefile
+        echo "LDFLAGS += -Wl,--gc-sections" >> Makefile
+    
+    - name: Build QuickJS
+      run: |
+        cd $QUICKJS_SOURCE
+        
+        # Build with cross-compiler
+        make -j$(nproc) qjs qjsc
+        
+        # Verify the binary architecture
+        file qjs
+        $TOOLCHAIN_BIN/${{ matrix.arch }}-openwrt-linux-strip qjs qjsc
+    
+    - name: Create IPK Package (Optional)
+      run: |
+        # Create OpenWrt package structure
+        mkdir -p quickjs-ipk/usr/bin
+        mkdir -p quickjs-ipk/usr/lib
+        
+        cp $QUICKJS_SOURCE/qjs quickjs-ipk/usr/bin/
+        cp $QUICKJS_SOURCE/qjsc quickjs-ipk/usr/bin/
+        
+        # Create control file
+        mkdir -p quickjs-ipk/CONTROL
+        cat > quickjs-ipk/CONTROL/control << EOF
+        Package: quickjs
+        Version: 2025-09-13
+        Depends: libc, libatomic
+        Architecture: ${{ matrix.arch }}
+        Maintainer: GitHub Actions
+        Section: lang
+        Priority: optional
+        Description: QuickJS JavaScript engine for OpenWrt
+        EOF
+        
+        # Package it (requires ipkg-build from OpenWrt SDK)
+        if [ -f "$OPENWRT_Sdk/scripts/ipkg-build" ]; then
+          $OPENWRT_SDK/scripts/ipkg-build quickjs-ipk
+        fi
+    
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: quickjs-${{ matrix.target }}
+        path: |
+          ${{ env.QUICKJS_SOURCE }}/qjs
+          ${{ env.QUICKJS_SOURCE }}/qjsc
+          quickjs_*.ipk
+        retention-days: 7
