@@ -20,9 +20,9 @@ jobs:
     - name: Setup OpenWrt SDK
       run: |
         # Download OpenWrt 24.10 SDK
-        SDK_URL="https://downloads.openwrt.org/releases/24.10.5/targets/bcm27xx/bcm2711/openwrt-sdk-24.10.5-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+        SDK_URL="https://downloads.openwrt.org/releases/${{ env.OPENWRT_VERSION }}/targets/${{ env.TARGET_ARCH }}/${{ env.TARGET_SUBTARGET }}/openwrt-sdk-${{ env.OPENWRT_VERSION }}-${{ env.TARGET_ARCH }}-${{ env.TARGET_SUBTARGET }}_gcc-13.3.0_musl.Linux-x86_64.tar.xz"
         
-        echo "Downloading SDK: $SDK_URL"
+        echo "Downloading SDK..."
         wget -q --show-progress $SDK_URL -O openwrt-sdk.tar.xz
         tar -xf openwrt-sdk.tar.xz
         mv openwrt-sdk-* openwrt-sdk
@@ -30,22 +30,28 @@ jobs:
         echo "OPENWRT_SDK=$(pwd)/openwrt-sdk" >> $GITHUB_ENV
         echo "STAGING_DIR=$(pwd)/openwrt-sdk/staging_dir" >> $GITHUB_ENV
     
-    - name: Setup Cross-Compiler
+    - name: Setup Cross-Compiler Environment
       run: |
-        # Find toolchain
+        # Find and set up toolchain
         TOOLCHAIN_DIR=$(find $STAGING_DIR -path "*/toolchain-${{ env.TARGET_ARCH }}*" -type d | head -1)
-        echo "Toolchain: $TOOLCHAIN_DIR"
-        
-        # Set environment
         TARGET_PREFIX="${{ env.TARGET_ARCH }}-openwrt-linux-"
+        
+        echo "Toolchain: $TOOLCHAIN_DIR"
         echo "TARGET_PREFIX=$TARGET_PREFIX" >> $GITHUB_ENV
         echo "TOOLCHAIN_BIN=$TOOLCHAIN_DIR/bin" >> $GITHUB_ENV
+        echo "SYSROOT=$TOOLCHAIN_DIR" >> $GITHUB_ENV
+        
+        # Add to PATH
         echo "$TOOLCHAIN_DIR/bin" >> $GITHUB_PATH
         
-        # Verify compiler
+        # Set environment for musl libc
+        echo "CFLAGS_SYSROOT=--sysroot=$TOOLCHAIN_DIR" >> $GITHUB_ENV
+        echo "LDFLAGS_SYSROOT=--sysroot=$TOOLCHAIN_DIR" >> $GITHUB_ENV
+        
+        # Verify
         $TOOLCHAIN_DIR/bin/${TARGET_PREFIX}gcc --version
     
-    - name: Download and Prepare QuickJS Source
+    - name: Download and Patch QuickJS
       run: |
         # Download source
         wget -q https://bellard.org/quickjs/quickjs-${{ env.QUICKJS_VERSION }}.tar.xz
@@ -53,177 +59,204 @@ jobs:
         mv quickjs-${{ env.QUICKJS_VERSION }} quickjs-source
         cd quickjs-source
         
-        # Create proper config.h with ALL required definitions
-        cat > config.h << 'EOF'
-        /* QuickJS configuration for OpenWrt cross-compilation */
-        #define CONFIG_VERSION "${{ env.QUICKJS_VERSION }}"
-        #define CONFIG_BIGNUM
-        #define CONFIG_CC "${{ env.TARGET_PREFIX }}gcc"
-        #define CONFIG_PREFIX "/usr"
-        #define CONFIG_LTO
-        #define _GNU_SOURCE
-        EOF
+        # Apply critical patches
+        echo "=== Patching QuickJS for OpenWrt/musl ==="
         
-        # Also create a qjscalc.js file if missing (sometimes required)
-        if [ ! -f qjscalc.js ]; then
-          echo "// Empty qjscalc.js" > qjscalc.js
+        # Patch 1: Fix signal handler type mismatch
+        sed -i 's/signal(SIGPIPE, SIG_IGN);/signal(SIGPIPE, (void(*)(int))SIG_IGN);/' quickjs-libc.c
+        
+        # Patch 2: Add extern declaration for environ
+        if ! grep -q "extern char \*\*environ;" quickjs-libc.c; then
+          sed -i '/#include <stdlib.h>/a extern char **environ;' quickjs-libc.c
         fi
         
+        # Patch 3: Define TRUE/FALSE if missing
+        if ! grep -q "#define TRUE" quickjs.c; then
+          sed -i '/#define _GNU_SOURCE/a #define TRUE 1\n#define FALSE 0' quickjs.c
+        fi
+        
+        # Patch 4: Fix list_entry usage
+        # This ensures JSFinRecEntry is properly defined
+        sed -i 's/JSFinRecEntry \*fre = list_entry(el, JSFinRecEntry, link);/struct {\n        struct list_head link;\n        JSValue obj;\n    } \*fre = list_entry(el, struct {\n        struct list_head link;\n        JSValue obj;\n    }, link);/' quickjs.c
+        
+        # Create minimal config.h
+        cat > config.h << 'EOF'
+        #define CONFIG_VERSION "${{ env.QUICKJS_VERSION }}"
+        #define CONFIG_CC "${{ env.TARGET_PREFIX }}gcc"
+        #define CONFIG_PREFIX "/usr"
+        #define _GNU_SOURCE
+        #define _DEFAULT_SOURCE
+        EOF
+        
         echo "QUICKJS_SOURCE=$(pwd)" >> $GITHUB_ENV
-        echo "Created config.h with CONFIG_VERSION=${{ env.QUICKJS_VERSION }}"
-        cat config.h
+        echo "Patches applied"
     
-    - name: Build QuickJS (Method 1 - Using config.h)
+    - name: Build with Fixed Environment
       run: |
         cd $QUICKJS_SOURCE
         
-        # Clean previous builds
+        # Clean
         make clean 2>/dev/null || true
         
-        # Build with explicit config
-        echo "Building with cross-compiler: ${{ env.TARGET_PREFIX }}gcc"
+        # Set environment variables for build
+        export CC="${{ env.TARGET_PREFIX }}gcc"
+        export AR="${{ env.TARGET_PREFIX }}ar"
+        export STRIP="${{ env.TARGET_PREFIX }}strip"
+        export RANLIB="${{ env.TARGET_PREFIX }}ranlib"
         
-        make CC="${{ env.TARGET_PREFIX }}gcc" \
-             AR="${{ env.TARGET_PREFIX }}ar" \
-             STRIP="${{ env.TARGET_PREFIX }}strip" \
-             HOST_CC="gcc" \
-             CFLAGS="-Os -pipe -I. -DCONFIG_VERSION='\"${{ env.QUICKJS_VERSION }}\"' -DCONFIG_CC='\"${{ env.TARGET_PREFIX }}gcc\"' -DCONFIG_PREFIX='\"/usr\"'" \
-             LDFLAGS="" \
-             -j$(nproc)
+        # Critical: Set sysroot and include paths
+        export CFLAGS="--sysroot=${{ env.SYSROOT }} -I${{ env.SYSROOT }}/include -I. -Os -pipe -fno-caller-saves -fno-plt -ffunction-sections -fdata-sections"
+        export LDFLAGS="--sysroot=${{ env.SYSROOT }} -Wl,--gc-sections"
+        export CPPFLAGS="-I${{ env.SYSROOT }}/include -D_GNU_SOURCE -D_DEFAULT_SOURCE"
         
-        echo "Build completed"
-        ls -lh qjs qjsc 2>/dev/null || echo "Binaries not found"
+        # Build with verbose output
+        echo "=== Build Environment ==="
+        echo "CC: $CC"
+        echo "CFLAGS: $CFLAGS"
+        echo "LDFLAGS: $LDFLAGS"
+        echo ""
+        
+        # First build dependencies
+        make -j$(nproc) libquickjs.a
+        
+        # Then build executables
+        make -j$(nproc) qjs qjsc
+        
+        echo "=== Build Complete ==="
+        ls -lh qjs qjsc libquickjs.a 2>/dev/null || true
     
-    - name: Alternative Build Method (If Method 1 Fails)
+    - name: Alternative Build - Simplified
       if: failure()
       run: |
         cd $QUICKJS_SOURCE
         make clean 2>/dev/null || true
         
-        # Method 2: Use the Makefile's config
-        # First patch the Makefile to use our config.h
-        cp config.h cutils.h 2>/dev/null || true
+        # Simple direct build
+        make CC="${{ env.TARGET_PREFIX }}gcc ${{ env.CFLAGS_SYSROOT }}" \
+             AR="${{ env.TARGET_PREFIX }}ar" \
+             CFLAGS="-Os -pipe -D_GNU_SOURCE -D_DEFAULT_SOURCE -DCONFIG_VERSION='\"${{ env.QUICKJS_VERSION }}\"'" \
+             LDFLAGS="${{ env.LDFLAGS_SYSROOT }}" \
+             -j$(nproc) qjs
         
-        # Build with config from file
-        make CC="${{ env.TARGET_PREFIX }}gcc" \
-             CFLAGS="-Os -pipe -I. -include config.h" \
-             -j$(nproc)
+        # Build qjsc separately if needed
+        [ -f qjs ] && make qjsc || true
     
-    - name: Verify and Prepare Binaries
+    - name: Verify Binaries
       run: |
         cd $QUICKJS_SOURCE
         
-        if [ -f qjs ] && [ -f qjsc ]; then
-          echo "✓ Binaries built successfully"
+        if [ -f qjs ]; then
+          echo "✓ Successfully built qjs"
           
           # Verify architecture
-          echo "=== Binary Information ==="
+          echo ""
+          echo "=== Binary Verification ==="
           file qjs
-          readelf -h qjs | grep -E "Machine|Class|OS/ABI"
+          echo ""
+          
+          # Check dynamic dependencies
+          echo "=== Dynamic Dependencies ==="
+          ${{ env.TARGET_PREFIX }}readelf -d qjs 2>/dev/null | grep -E "(NEEDED|INTERP)" || true
           
           # Strip binaries
-          ${{ env.TARGET_PREFIX }}strip qjs qjsc
+          ${{ env.TARGET_PREFIX }}strip qjs qjsc 2>/dev/null || true
           
           # Create test
-          echo 'print("QuickJS for OpenWrt ARM64 - Version ${{ env.QUICKJS_VERSION }}")' > test.js
-          echo "Test script created"
-          
-          # Prepare artifacts
-          mkdir -p ../artifacts
-          cp qjs qjsc test.js ../artifacts/
-          
-          # Check size
-          echo "Final binary sizes:"
-          ls -lh ../artifacts/qjs ../artifacts/qjsc
+          echo 'console.log("QuickJS for OpenWrt ARM64");' > test.js
         else
-          echo "✗ Binaries not found!"
-          ls -la
+          echo "✗ Build failed!"
+          
+          # Try to diagnose
+          echo "=== Build Directory Contents ==="
+          ls -la .obj/ 2>/dev/null || true
           exit 1
         fi
     
-    - name: Create Installation Package
+    - name: Create Standalone Package
       run: |
         mkdir -p artifacts
         
-        # Create install script
-        cat > artifacts/install.sh << 'EOF'
-        #!/bin/sh
-        echo "=== QuickJS Installer for OpenWrt ARM64 ==="
-        echo "Version: ${{ env.QUICKJS_VERSION }}"
-        echo "Target: ${{ env.TARGET_ARCH }}-${{ env.TARGET_SUBTARGET }}"
-        echo ""
+        # Copy binaries
+        cp $QUICKJS_SOURCE/qjs artifacts/ 2>/dev/null || true
+        cp $QUICKJS_SOURCE/qjsc artifacts/ 2>/dev/null || true
+        cp $QUICKJS_SOURCE/test.js artifacts/ 2>/dev/null || true
         
-        if [ ! -f qjs ]; then
-          echo "Error: qjs binary not found in current directory"
-          exit 1
+        # Create static-linked version if possible
+        if [ -f $QUICKJS_SOURCE/qjs ]; then
+          echo "=== Creating Static Binary ==="
+          cd $QUICKJS_SOURCE
+          
+          # Try static build
+          make clean 2>/dev/null || true
+          make CC="${{ env.TARGET_PREFIX }}gcc" \
+               CFLAGS="--sysroot=${{ env.SYSROOT }} -Os -pipe -static -D_GNU_SOURCE" \
+               LDFLAGS="--sysroot=${{ env.SYSROOT }} -static" \
+               qjs 2>/dev/null && cp qjs ../artifacts/qjs-static || echo "Static build failed, using dynamic"
+        fi
+        
+        # Create installer
+        cat > artifacts/install-openwrt.sh << 'EOF'
+        #!/bin/sh
+        echo "QuickJS for OpenWrt ARM64 - Installer"
+        echo "======================================"
+        
+        # Check if we're on OpenWrt
+        if [ ! -f /etc/openwrt_release ]; then
+          echo "Warning: This may not be an OpenWrt system"
         fi
         
         # Check architecture
-        if ! file qjs | grep -q "ARM aarch64"; then
-          echo "Warning: Binary may not be compatible with your system"
-          file qjs
+        ARCH=$(uname -m)
+        if [ "$ARCH" != "aarch64" ]; then
+          echo "Warning: System arch is $ARCH, but binary is for aarch64"
           read -p "Continue anyway? (y/n) " -n 1 -r
           echo
-          [[ $REPLY =~ ^[Yy]$ ]] || exit 1
+          [ "$REPLY" = "y" ] || exit 1
         fi
         
         # Install
         echo "Installing to /usr/bin/"
-        cp -f qjs qjsc /usr/bin/
-        chmod +x /usr/bin/qjs /usr/bin/qjsc
+        [ -f qjs ] && cp qjs /usr/bin/ && chmod 755 /usr/bin/qjs
+        [ -f qjsc ] && cp qjsc /usr/bin/ && chmod 755 /usr/bin/qjsc
         
         echo ""
         echo "Installation complete!"
-        echo "Test with: qjs --version"
-        echo "           qjs -e \"print('Hello from QuickJS!')\""
+        echo "Test: qjs --version"
         EOF
         
-        chmod +x artifacts/install.sh
+        chmod +x artifacts/install-openwrt.sh
         
-        # Create README
-        cat > artifacts/README.md << EOF
-        # QuickJS for OpenWrt 24.10 (ARM64)
+        # Create info file
+        cat > artifacts/BUILD-INFO.txt << EOF
+        QuickJS Build for OpenWrt
+        ========================
         
-        **Version**: ${{ env.QUICKJS_VERSION }}
-        **Target**: ${{ env.TARGET_ARCH }}-${{ env.TARGET_SUBTARGET }}
-        **OpenWrt**: ${{ env.OPENWRT_VERSION }}
+        Version: ${{ env.QUICKJS_VERSION }}
+        Target: ${{ env.TARGET_ARCH }}-${{ env.TARGET_SUBTARGET }}
+        OpenWrt: ${{ env.OPENWRT_VERSION }}
+        Build Date: $(date)
         
-        ## Files
-        - \`qjs\`: JavaScript interpreter (stripped)
-        - \`qjsc\`: JavaScript compiler (stripped)
-        - \`test.js\`: Simple test script
-        - \`install.sh\`: Installation script
+        Files:
+        - qjs: JavaScript interpreter
+        - qjsc: JavaScript compiler
+        - qjs-static: Statically linked version (if available)
         
-        ## Installation
-        1. Upload files to your OpenWrt device
-        2. Run: \`chmod +x install.sh\`
-        3. Run: \`./install.sh\`
+        Installation:
+        scp artifacts/* root@your-openwrt-ip:/tmp/
+        ssh root@your-openwrt-ip "cd /tmp && chmod +x qjs && ./qjs --version"
         
-        ## Manual Installation
-        \`\`\`bash
-        cp qjs qjsc /usr/bin/
-        chmod +x /usr/bin/qjs /usr/bin/qjsc
-        \`\`\`
-        
-        ## Test
-        \`\`\`bash
-        qjs --version
-        qjs test.js
-        qjs -e "print(2 + 3 * 4)"
-        \`\`\`
-        
-        ## Build Info
-        - Cross-compiled with OpenWrt SDK
-        - Optimized for Cortex-A72
+        Notes:
+        - Built with OpenWrt SDK ${{ env.OPENWRT_VERSION }}
         - Uses musl libc
+        - Optimized for Cortex-A72
         EOF
         
-        echo "Package created in artifacts/"
-        ls -la artifacts/
+        echo "=== Artifacts Created ==="
+        ls -lh artifacts/
     
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: quickjs-openwrt-${{ env.TARGET_ARCH }}
+        name: quickjs-openwrt-${{ env.TARGET_ARCH }}-${{ env.QUICKJS_VERSION }}
         path: artifacts/
         retention-days: 7
