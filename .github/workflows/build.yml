@@ -106,7 +106,6 @@ jobs:
 
         # confirm
         sed -n '1,120p' config.h
-
     - name: Build QuickJS (OpenWrt aarch64) — FORCE cross tools
       env:
         TOOLCHAIN: ${{ env.TOOLCHAIN }}
@@ -115,33 +114,30 @@ jobs:
       run: |
         set -euo pipefail
         cd "${{ env.QUICKJS_DIR }}"
-
-        # cleanup (upstream Makefile has no 'make clean')
+    
+        # cleanup
         rm -rf .obj *.o *.a *.d qjs qjsc libquickjs.a || true
-
-        # Ensure toolchain on PATH for this step (absolute path)
+    
+        # Ensure toolchain on PATH
         export PATH="${TOOLCHAIN}/bin:$PATH"
-
-        # Absolute cross-tool binaries (avoid relying on Makefile defaults)
+    
+        # Cross-tool binaries
         CROSS_CC="${TOOLCHAIN}/bin/aarch64-openwrt-linux-gcc"
         CROSS_AR="${TOOLCHAIN}/bin/aarch64-openwrt-linux-ar"
         CROSS_RANLIB="${TOOLCHAIN}/bin/aarch64-openwrt-linux-ranlib"
         CROSS_STRIP="${TOOLCHAIN}/bin/aarch64-openwrt-linux-strip"
-
-        # Sysroot and include flags
+    
+        # Sysroot and flags
         SYSROOT="${SYSROOT}"
         CPPFLAGS="-I${SYSROOT}/usr/include -I. -include config.h -D_GNU_SOURCE -D_DEFAULT_SOURCE"
-
-        CFLAGS="--sysroot=${SYSROOT} -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE -DCONFIG_VERSION=\"0\""
-
+        CFLAGS="--sysroot=${SYSROOT} -Os -pipe -ffunction-sections -fdata-sections"
         LDFLAGS="--sysroot=${SYSROOT} -Wl,--gc-sections"
-
+    
         # Sanity
         echo "Using CROSS_CC=${CROSS_CC}"
         $CROSS_CC --version
-
-        # IMPORTANT: pass the cross tools as make variables on the command line
-        # This forces Makefile to use them regardless of its CC=... setting.
+    
+        # Build library
         make -j$(nproc) \
           CC="${CROSS_CC}" \
           AR="${CROSS_AR}" \
@@ -151,7 +147,8 @@ jobs:
           CFLAGS="${CFLAGS}" \
           LDFLAGS="${LDFLAGS}" \
           libquickjs.a
-
+    
+        # Build executables
         make -j$(nproc) \
           CC="${CROSS_CC}" \
           AR="${CROSS_AR}" \
@@ -161,9 +158,10 @@ jobs:
           CFLAGS="${CFLAGS}" \
           LDFLAGS="${LDFLAGS}" \
           qjs qjsc
-
-        # show artifacts
+    
+        # Show artifacts
         ls -lh qjs qjsc libquickjs.a || true
+
 
     - name: Strip and verify artifacts
       run: |
