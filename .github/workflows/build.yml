@@ -130,7 +130,8 @@ jobs:
 
         # Sysroot and include flags
         SYSROOT="${SYSROOT}"
-        CPPFLAGS="-I${SYSROOT}/usr/include -I. -D_GNU_SOURCE -D_DEFAULT_SOURCE"
+        CPPFLAGS="-I${SYSROOT}/usr/include -I. -include config.h -D_GNU_SOURCE -D_DEFAULT_SOURCE"
+
         CFLAGS="--sysroot=${SYSROOT} -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE"
         LDFLAGS="--sysroot=${SYSROOT} -Wl,--gc-sections"
 
