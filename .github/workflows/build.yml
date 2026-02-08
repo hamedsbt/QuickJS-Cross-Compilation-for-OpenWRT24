@@ -64,8 +64,15 @@ jobs:
       - name: Build QuickJS
         run: |
           set -e
-          make clean
+      
+          # QuickJS has no "make clean"
+          rm -rf .obj \
+                 *.o *.a *.d \
+                 qjs qjsc \
+                 libquickjs.a
+      
           make -j$(nproc)
+
 
       - name: Strip binaries
         run: |
