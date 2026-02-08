@@ -107,41 +107,58 @@ jobs:
         # confirm
         sed -n '1,120p' config.h
 
-    - name: Build QuickJS (libquickjs, qjs, qjsc)
+    - name: Build QuickJS (OpenWrt aarch64) — FORCE cross tools
       env:
-        CC: ${{ env.CC }}
-        AR: ${{ env.AR }}
-        RANLIB: ${{ env.RANLIB }}
-        STRIP: ${{ env.STRIP }}
+        TOOLCHAIN: ${{ env.TOOLCHAIN }}
         SYSROOT: ${{ env.SYSROOT }}
-        CFLAGS_BASE: ${{ env.CFLAGS_BASE }}
-        LDFLAGS_BASE: ${{ env.LDFLAGS_BASE }}
+        QUICKJS_VERSION: ${{ env.QUICKJS_VERSION }}
       run: |
         set -euo pipefail
         cd "${{ env.QUICKJS_DIR }}"
 
-        # Clean upstream build artifacts (QuickJS Makefile doesn't provide 'make clean')
+        # cleanup (upstream Makefile has no 'make clean')
         rm -rf .obj *.o *.a *.d qjs qjsc libquickjs.a || true
 
-        # Export cross-toolchain
-        export PATH="${{ env.TOOLCHAIN }}/bin:$PATH"
-        export CC="aarch64-openwrt-linux-gcc"
-        export AR="aarch64-openwrt-linux-ar"
-        export RANLIB="aarch64-openwrt-linux-ranlib"
-        export STRIP="aarch64-openwrt-linux-strip"
+        # Ensure toolchain on PATH for this step (absolute path)
+        export PATH="${TOOLCHAIN}/bin:$PATH"
 
-        # Compose flags (do NOT attempt to inject CONFIG_VERSION here)
-        export CFLAGS="${CFLAGS_BASE}"
-        export LDFLAGS="${LDFLAGS_BASE}"
-        export CPPFLAGS="-I${SYSROOT}/usr/include -I. -D_GNU_SOURCE -D_DEFAULT_SOURCE"
+        # Absolute cross-tool binaries (avoid relying on Makefile defaults)
+        CROSS_CC="${TOOLCHAIN}/bin/aarch64-openwrt-linux-gcc"
+        CROSS_AR="${TOOLCHAIN}/bin/aarch64-openwrt-linux-ar"
+        CROSS_RANLIB="${TOOLCHAIN}/bin/aarch64-openwrt-linux-ranlib"
+        CROSS_STRIP="${TOOLCHAIN}/bin/aarch64-openwrt-linux-strip"
 
-        # Sanity check
-        which $CC
-        $CC --version
+        # Sysroot and include flags
+        SYSROOT="${SYSROOT}"
+        CPPFLAGS="-I${SYSROOT}/usr/include -I. -D_GNU_SOURCE -D_DEFAULT_SOURCE"
+        CFLAGS="--sysroot=${SYSROOT} -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE"
+        LDFLAGS="--sysroot=${SYSROOT} -Wl,--gc-sections"
 
-        # Build library and executables
-        make -j$(nproc) libquickjs.a
-        make -j$(nproc) qjs qjsc
+        # Sanity
+        echo "Using CROSS_CC=${CROSS_CC}"
+        $CROSS_CC --version
+
+        # IMPORTANT: pass the cross tools as make variables on the command line
+        # This forces Makefile to use them regardless of its CC=... setting.
+        make -j$(nproc) \
+          CC="${CROSS_CC}" \
+          AR="${CROSS_AR}" \
+          RANLIB="${CROSS_RANLIB}" \
+          STRIP="${CROSS_STRIP}" \
+          CPPFLAGS="${CPPFLAGS}" \
+          CFLAGS="${CFLAGS}" \
+          LDFLAGS="${LDFLAGS}" \
+          libquickjs.a
+
+        make -j$(nproc) \
+          CC="${CROSS_CC}" \
+          AR="${CROSS_AR}" \
+          RANLIB="${CROSS_RANLIB}" \
+          STRIP="${CROSS_STRIP}" \
+          CPPFLAGS="${CPPFLAGS}" \
+          CFLAGS="${CFLAGS}" \
+          LDFLAGS="${LDFLAGS}" \
+          qjs qjsc
 
         # show artifacts
         ls -lh qjs qjsc libquickjs.a || true
