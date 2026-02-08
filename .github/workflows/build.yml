@@ -22,7 +22,7 @@ jobs:
     - name: Download OpenWrt SDK
       run: |
         set -euo pipefail
-        SDK_URL="https://downloads.openwrt.org/releases/${OPENWRT_SDK_VERSION}/targets/${OPENWRT_TARGET}/openwrt-sdk-${OPENWRT_SDK_VERSION}-${OPENWRT_TARGET}_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+        SDK_URL="https://downloads.openwrt.org/releases/24.10.5/targets/bcm27xx/bcm2711/openwrt-sdk-24.10.5-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
         echo "SDK_URL=${SDK_URL}"
         wget -q --show-progress "${SDK_URL}" -O openwrt-sdk.tar.zst
 
