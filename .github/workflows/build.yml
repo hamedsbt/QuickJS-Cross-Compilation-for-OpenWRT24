@@ -132,7 +132,8 @@ jobs:
         SYSROOT="${SYSROOT}"
         CPPFLAGS="-I${SYSROOT}/usr/include -I. -include config.h -D_GNU_SOURCE -D_DEFAULT_SOURCE"
 
-        CFLAGS="--sysroot=${SYSROOT} -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE -DCONFIG_VERSION=2509"
+        CFLAGS="--sysroot=${SYSROOT} -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE -DCONFIG_VERSION=\"0\""
+
         LDFLAGS="--sysroot=${SYSROOT} -Wl,--gc-sections"
 
         # Sanity
