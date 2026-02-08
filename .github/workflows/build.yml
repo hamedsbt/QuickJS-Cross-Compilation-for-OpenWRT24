@@ -89,44 +89,43 @@ jobs:
         sed -i 's/signal(SIGPIPE, SIG_IGN);/signal(SIGPIPE, (void (*)(int))SIG_IGN);/' quickjs-libc.c || true
         grep -q 'extern char \*\*environ;' quickjs-libc.c || sed -i '/#include <stdlib.h>/a extern char **environ;' quickjs-libc.c || true
         echo "Patched quickjs-libc.c (safe patches)"
-
-    - name: Build QuickJS (libquickjs.a, qjs, qjsc)
-      env:
-        CC: ${{ env.CC }}
-        AR: ${{ env.AR }}
-        RANLIB: ${{ env.RANLIB }}
-        STRIP: ${{ env.STRIP }}
-        SYSROOT: ${{ env.SYSROOT }}
+    
+    - name: Build QuickJS (FIX stdlib.h error)
       run: |
         set -euo pipefail
+    
         cd "${{ env.QUICKJS_DIR }}"
-
-        # Clean prior outputs (QuickJS does not define 'make clean')
+    
+        # Clean (QuickJS has no make clean)
         rm -rf .obj *.o *.a *.d qjs qjsc libquickjs.a || true
-
-        # Export the cross-toolchain explicitly for Makefile
-        export CC="$CC"
-        export AR="$AR"
-        export RANLIB="$RANLIB"
-
-        # Ensure Makefile exists
-        if [ ! -f Makefile ]; then
-          echo "ERROR: Makefile not found in $(pwd)"
-          ls -la
-          exit 1
-        fi
-
-        # Provide CPPFLAGS to include target headers (helpful)
-        export CPPFLAGS="-I$SYSROOT/usr/include -D_GNU_SOURCE -D_DEFAULT_SOURCE"
+    
+        # Force cross compiler
+        export PATH="${{ env.TOOLCHAIN }}/bin:$PATH"
+    
+        export CC="aarch64-openwrt-linux-gcc"
+        export AR="aarch64-openwrt-linux-ar"
+        export RANLIB="aarch64-openwrt-linux-ranlib"
+        export STRIP="aarch64-openwrt-linux-strip"
+    
+        export SYSROOT="${{ env.SYSROOT }}"
+    
         export CFLAGS="--sysroot=$SYSROOT -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE"
         export LDFLAGS="--sysroot=$SYSROOT -Wl,--gc-sections"
+    
+        # Sanity check (this MUST work)
+        which $CC
+        $CC --version
+    
+        # Build
+        make -j$(nproc) \
+          CC="$CC" \
+          AR="$AR" \
+          RANLIB="$RANLIB" \
+          STRIP="$STRIP" \
+          CFLAGS="$CFLAGS" \
+          LDFLAGS="$LDFLAGS" \
+          libquickjs.a qjs qjsc
 
-        # Build library and executables
-        make -j$(nproc) libquickjs.a
-        make -j$(nproc) qjs qjsc
-
-        # Verify binaries
-        ls -lh qjs qjsc libquickjs.a || true
 
     - name: Strip and verify artifacts
       run: |
