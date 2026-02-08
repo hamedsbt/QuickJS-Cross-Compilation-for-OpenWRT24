@@ -15,8 +15,8 @@ jobs:
     steps:
     - name: Prepare runner
       run: |
-        sudo apt-get update
-        sudo apt-get install -y wget xz-utils build-essential zstd file
+        sudo apt-get update -y
+        sudo apt-get install -y wget xz-utils zstd build-essential file
 
     - name: Download OpenWrt SDK
       run: |
@@ -25,25 +25,29 @@ jobs:
         wget -q --show-progress "$OPENWRT_SDK_URL" -O openwrt-sdk.tar.zst
         tar --zstd -xf openwrt-sdk.tar.zst
         SDK_DIR="$(ls -d openwrt-sdk-* | head -n1)"
+        if [ -z "$SDK_DIR" ]; then
+          echo "ERROR: SDK extraction failed"
+          ls -la
+          exit 1
+        fi
         echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
         ls -ld "$SDK_DIR"
 
     - name: Download QuickJS source
       run: |
         set -euo pipefail
-        echo "Downloading QuickJS ${QUICKJS_VERSION}..."
-        wget -q https://bellard.org/quickjs/quickjs-${QUICKJS_VERSION}.tar.xz -O "${QUICKJS_TARBALL}"
+        wget -q "https://bellard.org/quickjs/quickjs-${QUICKJS_VERSION}.tar.xz" -O "${QUICKJS_TARBALL}"
         tar -xf "${QUICKJS_TARBALL}"
         QUICKJS_DIR="quickjs-${QUICKJS_VERSION}"
         if [ ! -d "$QUICKJS_DIR" ]; then
-          echo "QuickJS source dir not found"
+          echo "ERROR: QuickJS source not found"
           ls -la
           exit 1
         fi
         echo "QUICKJS_DIR=$QUICKJS_DIR" >> $GITHUB_ENV
         ls -ld "$QUICKJS_DIR"
 
-    - name: Setup OpenWrt toolchain and sysroot (make compiler available NOW)
+    - name: Setup OpenWrt toolchain (make compiler available now)
       run: |
         set -euo pipefail
 
@@ -62,13 +66,13 @@ jobs:
         echo "Found TOOLCHAIN: $TOOLCHAIN"
         echo "Found SYSROOT:   $SYSROOT"
 
-        # immediate PATH for this step (so we can verify)
+        # Make cross tools available in this step immediately
         export PATH="$TOOLCHAIN/bin:$PATH"
 
-        # verify cross-compiler exists in PATH now
+        # Verify compiler is available now
         aarch64-openwrt-linux-gcc --version
 
-        # persist for later steps
+        # Persist for later steps
         echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_PATH
         echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
         echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
@@ -78,72 +82,75 @@ jobs:
         echo "RANLIB=$TOOLCHAIN/bin/aarch64-openwrt-linux-ranlib" >> $GITHUB_ENV
         echo "STRIP=$TOOLCHAIN/bin/aarch64-openwrt-linux-strip" >> $GITHUB_ENV
 
-        echo "CFLAGS=--sysroot=$SYSROOT -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE" >> $GITHUB_ENV
-        echo "LDFLAGS=--sysroot=$SYSROOT -Wl,--gc-sections" >> $GITHUB_ENV
+        # Helpful environment variables for the Makefile
+        echo "STAGING_DIR=$STAGING" >> $GITHUB_ENV
+        echo "CFLAGS_BASE=--sysroot=$SYSROOT -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE" >> $GITHUB_ENV
+        echo "LDFLAGS_BASE=--sysroot=$SYSROOT -Wl,--gc-sections" >> $GITHUB_ENV
 
-    - name: Apply small compatibility patches (safe)
+    - name: Apply safe patches and create config.h
       run: |
         set -euo pipefail
         cd "${{ env.QUICKJS_DIR }}"
-        # only safe, local patches; do not alter core structures
+
+        # Small safe patches:
         sed -i 's/signal(SIGPIPE, SIG_IGN);/signal(SIGPIPE, (void (*)(int))SIG_IGN);/' quickjs-libc.c || true
         grep -q 'extern char \*\*environ;' quickjs-libc.c || sed -i '/#include <stdlib.h>/a extern char **environ;' quickjs-libc.c || true
-        echo "Patched quickjs-libc.c (safe patches)"
-    
-    - name: Build QuickJS (OpenWrt aarch64)
-      shell: bash
+
+        # Create config.h that defines CONFIG_VERSION as a string literal (prevents parsing issues)
+        cat > config.h <<'EOF'
+        #ifndef CONFIG_H
+        #define CONFIG_H
+        #define CONFIG_VERSION "2025-09-13"
+        #endif
+        EOF
+
+        # confirm
+        sed -n '1,120p' config.h
+
+    - name: Build QuickJS (libquickjs, qjs, qjsc)
+      env:
+        CC: ${{ env.CC }}
+        AR: ${{ env.AR }}
+        RANLIB: ${{ env.RANLIB }}
+        STRIP: ${{ env.STRIP }}
+        SYSROOT: ${{ env.SYSROOT }}
+        CFLAGS_BASE: ${{ env.CFLAGS_BASE }}
+        LDFLAGS_BASE: ${{ env.LDFLAGS_BASE }}
       run: |
         set -euo pipefail
-    
-        cd "quickjs-${QUICKJS_VERSION}"
-    
-        # Clean (QuickJS has no make clean)
+        cd "${{ env.QUICKJS_DIR }}"
+
+        # Clean upstream build artifacts (QuickJS Makefile doesn't provide 'make clean')
         rm -rf .obj *.o *.a *.d qjs qjsc libquickjs.a || true
-    
-        # Toolchain paths
-        export SDK_DIR="$PWD/../${SDK_DIR}"
-        export TOOLCHAIN="$SDK_DIR/staging_dir/toolchain-aarch64_cortex-a72_gcc-13.3.0_musl"
-        export SYSROOT="$SDK_DIR/staging_dir/target-aarch64_cortex-a72_musl"
-        export STAGING_DIR="$SDK_DIR/staging_dir"
-    
-        export PATH="$TOOLCHAIN/bin:$PATH"
-    
-        # Cross tools
+
+        # Export cross-toolchain
+        export PATH="${{ env.TOOLCHAIN }}/bin:$PATH"
         export CC="aarch64-openwrt-linux-gcc"
         export AR="aarch64-openwrt-linux-ar"
         export RANLIB="aarch64-openwrt-linux-ranlib"
         export STRIP="aarch64-openwrt-linux-strip"
-    
-        # Flags (IMPORTANT PART)
-        export CFLAGS="--sysroot=$SYSROOT -Os -pipe \
-          -ffunction-sections -fdata-sections \
-          -D_GNU_SOURCE -D_DEFAULT_SOURCE \
-          -DCONFIG_VERSION=\"${QUICKJS_VERSION}\""
-    
-        export LDFLAGS="--sysroot=$SYSROOT -Wl,--gc-sections"
-    
+
+        # Compose flags (do NOT attempt to inject CONFIG_VERSION here)
+        export CFLAGS="${CFLAGS_BASE}"
+        export LDFLAGS="${LDFLAGS_BASE}"
+        export CPPFLAGS="-I${SYSROOT}/usr/include -I. -D_GNU_SOURCE -D_DEFAULT_SOURCE"
+
         # Sanity check
         which $CC
         $CC --version
-    
-        # Build
-        make -j$(nproc) \
-          CC="$CC" \
-          AR="$AR" \
-          RANLIB="$RANLIB" \
-          STRIP="$STRIP" \
-          CFLAGS="$CFLAGS" \
-          LDFLAGS="$LDFLAGS" \
-          libquickjs.a qjs qjsc
 
+        # Build library and executables
+        make -j$(nproc) libquickjs.a
+        make -j$(nproc) qjs qjsc
 
+        # show artifacts
+        ls -lh qjs qjsc libquickjs.a || true
 
     - name: Strip and verify artifacts
       run: |
         set -euo pipefail
         cd "${{ env.QUICKJS_DIR }}"
 
-        # Use provided strip if available
         if [ -n "${{ env.STRIP }}" ] && [ -x "${{ env.STRIP }}" ]; then
           "${{ env.STRIP }}" qjs qjsc || true
         fi
@@ -152,7 +159,7 @@ jobs:
         file qjs qjsc || true
         readelf -l qjs | sed -n '1,120p' || true
 
-    - name: Package and upload artifacts
+    - name: Package artifacts
       run: |
         set -euo pipefail
         cd "${{ env.QUICKJS_DIR }}"
@@ -160,7 +167,9 @@ jobs:
         cp qjs qjsc libquickjs.a artifacts/ || true
         printf "QuickJS %s (OpenWrt aarch64)\n" "${QUICKJS_VERSION}" > artifacts/README.txt
         ls -lh artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: quickjs-openwrt-aarch64
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: quickjs-openwrt-aarch64-${{ env.QUICKJS_VERSION }}
         path: artifacts/
