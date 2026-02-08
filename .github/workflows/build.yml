@@ -21,17 +21,15 @@ jobs:
             build-essential \
             wget \
             tar \
-            zstd \
-            xz-utils
+            zstd
 
       - name: Download OpenWrt SDK
         run: |
           set -e
-          SDK_URL="https://downloads.openwrt.org/releases/24.10.5/targets/bcm27xx/bcm2711/openwrt-sdk-24.10.5-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-          wget -q "$SDK_URL"
+          wget -q https://downloads.openwrt.org/releases/24.10.5/targets/bcm27xx/bcm2711/openwrt-sdk-24.10.5-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.zst
           tar --zstd -xf openwrt-sdk-24.10.5-bcm27xx-bcm2711_gcc-13.3.0_musl.Linux-x86_64.tar.zst
 
-      - name: Setup OpenWrt toolchain environment
+      - name: Setup OpenWrt toolchain
         run: |
           set -euo pipefail
 
@@ -46,6 +44,13 @@ jobs:
             exit 1
           fi
 
+          # ✅ EXPORT PATH FOR *THIS* STEP
+          export PATH="$TOOLCHAIN/bin:$PATH"
+
+          # ✅ VERIFY TOOLCHAIN NOW (works)
+          aarch64-openwrt-linux-gcc --version
+
+          # Persist for later steps
           echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_PATH
 
           echo "CC=$TOOLCHAIN/bin/aarch64-openwrt-linux-gcc" >> $GITHUB_ENV
@@ -55,8 +60,6 @@ jobs:
 
           echo "CFLAGS=-Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE" >> $GITHUB_ENV
           echo "LDFLAGS=-Wl,--gc-sections" >> $GITHUB_ENV
-
-          aarch64-openwrt-linux-gcc --version
 
       - name: Build QuickJS
         run: |
