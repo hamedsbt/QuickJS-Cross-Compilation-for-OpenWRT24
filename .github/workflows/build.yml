@@ -48,47 +48,48 @@ jobs:
     - name: Locate staging_dir, toolchain and sysroot (CRITICAL)
       run: |
         set -euo pipefail
-        SDK_DIR=${{ env.SDK_DIR:-$(ls -d openwrt-sdk-* 2>/dev/null | head -n1)}}
+    
+        # Find extracted SDK directory
+        SDK_DIR="$(ls -d openwrt-sdk-* 2>/dev/null | head -n1)"
+        if [ -z "$SDK_DIR" ]; then
+          echo "ERROR: SDK directory not found"
+          ls -la
+          exit 1
+        fi
+    
         STAGING="$PWD/$SDK_DIR/staging_dir"
         if [ ! -d "$STAGING" ]; then
           echo "ERROR: staging_dir not found at $STAGING"
-          ls -la "$PWD/$SDK_DIR" || true
+          ls -la "$PWD/$SDK_DIR"
           exit 1
         fi
-
-        TOOLCHAIN=$(find "$STAGING" -maxdepth 1 -type d -name "toolchain-*" | head -n1)
-        if [ -z "$TOOLCHAIN" ]; then
-          echo "ERROR: toolchain-* directory not found in $STAGING"
-          ls -la "$STAGING" || true
+    
+        TOOLCHAIN="$(find "$STAGING" -maxdepth 1 -type d -name 'toolchain-*' | head -n1)"
+        SYSROOT="$(find "$STAGING" -maxdepth 1 -type d -name 'target-*' | head -n1)"
+    
+        if [ -z "$TOOLCHAIN" ] || [ -z "$SYSROOT" ]; then
+          echo "ERROR: toolchain or sysroot not found"
+          ls -la "$STAGING"
           exit 1
         fi
-
-        SYSROOT=$(find "$STAGING" -maxdepth 1 -type d -name "target-*" | head -n1)
-        if [ -z "$SYSROOT" ]; then
-          echo "ERROR: target-* (sysroot) directory not found in $STAGING"
-          ls -la "$STAGING" || true
-          exit 1
-        fi
-
+    
+        echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
         echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
         echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
-
-        # Provide absolute tool binaries
+    
         echo "CC=$TOOLCHAIN/bin/aarch64-openwrt-linux-gcc" >> $GITHUB_ENV
         echo "AR=$TOOLCHAIN/bin/aarch64-openwrt-linux-ar" >> $GITHUB_ENV
         echo "RANLIB=$TOOLCHAIN/bin/aarch64-openwrt-linux-ranlib" >> $GITHUB_ENV
         echo "STRIP=$TOOLCHAIN/bin/aarch64-openwrt-linux-strip" >> $GITHUB_ENV
-
-        # Export PATH for immediate use in this step (not needed for later steps; use GITHUB_PATH if you prefer)
-        echo "$TOOLCHAIN/bin" >> $GITHUB_PATH
-
-        # CFLAGS/LDFLAGS point to the target sysroot (important)
+    
         echo "CFLAGS=--sysroot=$SYSROOT -Os -pipe -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_DEFAULT_SOURCE" >> $GITHUB_ENV
         echo "LDFLAGS=--sysroot=$SYSROOT -Wl,--gc-sections" >> $GITHUB_ENV
-
-        # Quick verification
-        $TOOLCHAIN/bin/aarch64-openwrt-linux-gcc --version
-        $TOOLCHAIN/bin/aarch64-openwrt-linux-strip --version || true
+    
+        echo "$TOOLCHAIN/bin" >> $GITHUB_PATH
+    
+        # Verification
+        "$TOOLCHAIN/bin/aarch64-openwrt-linux-gcc" --version
+        "$TOOLCHAIN/bin/aarch64-openwrt-linux-strip" --version || true
 
     - name: Download QuickJS source
       run: |
